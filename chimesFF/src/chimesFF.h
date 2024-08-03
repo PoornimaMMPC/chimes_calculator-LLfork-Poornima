@@ -179,6 +179,21 @@ public:
     inline int  get_badness();
     inline void reset_badness();
     
+    
+    // New for tabulation
+
+    bool                    tabulate_2B;        
+    vector<string>          tab_param_files;    // tab_param_files[pair type index]
+    vector<vector<double> > tab_r;              // tab_r[pair type index][rij]
+    vector<vector<double> > tab_e;              // tab_e[pair type index][energy]
+    vector<vector<double> > tab_f;              // tab_e[pair type index][force]
+    
+    void   read_2B_tab(string tab_file, bool energy=true);
+    void   compute_2B_tab(const double dx, const vector<double> & dr, const vector<int> typ_idxs, vector<double> & force, vector<double> & stress, double & energy, chimes2BTmp &tmp, double & force_scalar_in);     
+    double get_tab_2B(int pair_idx, double rij, bool for_energy);
+    
+    
+    
 private:
         
     string            xform_style;    //  Morse, direct, inverse, etc...
@@ -189,7 +204,10 @@ private:
     vector<double>    penalty_params; // [2];  Second dimension: [0] = A_pen, [1] = d_pen
     vector<double>    energy_offsets; // [natmtyps]; Single atom ChIMES energies
     int               badness;        // Keeps track of whether any interactions for atoms owned by proc rank are below rcutin, in the penalty region, or in the r>rcutin+dp region. 0 = good, 1 = in penalty region, 2 = below rcutin 
-        
+    
+
+    
+            
     // Names (chemical symbols for constituent atoms) .. handled differently for 2-body versus >2-body interactions
 
     vector<string> pair_params_atm_chem_1;    //[npairs]; // first atom in pair
@@ -268,7 +286,7 @@ private:
     
     inline void get_fcut(const double dx, const double outer_cutoff, double & fcut, double & fcutderiv);
         
-    inline void get_penalty(const double dx, const int & pair_idx, double & E_penalty, double & force_scalar);
+    inline void get_penalty(const double dx, const int & pair_idx, double & E_penalty, double & force_scalar, bool just_check=false);
         
     inline void build_atom_and_pair_mappers(const int natoms, const int npairs, const vector<int> & typ_idxs,
                                             const vector<string> & clu_params_atm_chems, vector<int >  & mapped_pair_idx);
@@ -338,7 +356,7 @@ inline void chimesFF::get_fcut(const double dx, const double outer_cutoff, doubl
     }
 }
 
-inline void chimesFF::get_penalty(const double dx, const int & pair_idx, double & E_penalty, double & force_scalar)
+inline void chimesFF::get_penalty(const double dx, const int & pair_idx, double & E_penalty, double & force_scalar, bool just_check)
 {
     double r_penalty = 0.0;
     
@@ -354,6 +372,9 @@ inline void chimesFF::get_penalty(const double dx, const int & pair_idx, double 
         else if (1 > badness) // Only update badness if candiate badness is worse than its current value
             badness = 1;
     }    
+    
+    if (just_check)
+        return;
     if ( r_penalty > 0.0 ) 
     {        
         E_penalty    = r_penalty * r_penalty * r_penalty * penalty_params[1];

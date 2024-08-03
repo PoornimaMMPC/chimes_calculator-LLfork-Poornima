@@ -995,6 +995,8 @@ void serial_chimes_interface::calculate(vector<double> & x_in, vector<double> & 
     ////////////////////////
     // interate over 1- and 2b's 
     ////////////////////////
+    
+    double force_scalar_dummy; // REMOVE ONCE TAB IS OVERLOADED LIKE NON-TAB VERSION
 
     for(int i=0; i<sys.n_atoms; i++)
     {
@@ -1012,8 +1014,11 @@ void serial_chimes_interface::calculate(vector<double> & x_in, vector<double> & 
             for (int idx=0; idx<2*CHDIM; idx++) {
                 force_2b[idx] = 0.0 ;
             }
-            
-            compute_2B(dist, dr, typ_idxs_2b, force_2b, stress_chimes, energy, chimes_2btmp);
+
+            if (tabulate_2B)
+                compute_2B_tab(dist, dr, typ_idxs_2b, force_2b, stress_chimes, energy, chimes_2btmp, force_scalar_dummy);
+            else
+                compute_2B    (dist, dr, typ_idxs_2b, force_2b, stress_chimes, energy, chimes_2btmp);
 
             for (int idx=0; idx<3; idx++)
             {
