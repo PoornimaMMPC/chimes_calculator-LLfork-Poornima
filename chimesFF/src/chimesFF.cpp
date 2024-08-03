@@ -5,7 +5,7 @@
 */
 
 #include<vector>
-#include<iostream>s
+#include<iostream>
 #include<iomanip>
 #include<fstream>
 #include<string>
