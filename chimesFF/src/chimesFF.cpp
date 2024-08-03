@@ -82,12 +82,24 @@ int chimesFF::get_proper_pair(string ty1, string ty2)
     exit(0);
 }
 
+string get_directory_path(const string& file_path) 
+{
+    size_t pos = file_path.find_last_of("/\\");
+    
+    if (pos != string::npos) 
+        return file_path.substr(0, pos);
+    else 
+        return ""; // If no directory path is available
+}
+
 chimesFF::chimesFF()
 {
     natmtyps = 0;
     penalty_params.resize(2);
     
     // Set defaults
+    
+    tabulate_2B = false;
     
     fcut_type = fcutType::CUBIC ;
     
@@ -180,12 +192,73 @@ string chimesFF::get_next_line(istream& str)
     return line;
 }
 
+void chimesFF::read_2B_tab(string tab_file, bool energy)
+{
+    ifstream tab_files;
+    
+    if (energy)
+        tab_file += ".energy";
+    else
+        tab_file += ".force";
+    tab_files.open(tab_file);
+    
+    
+    if (!tab_files.is_open())
+    {
+        cout << "ERROR: Could not open file: " << tab_file << endl;
+        exit(0);
+    }
+
+    // Tabulated file format:
+    // nlines of tabulated data to follow
+    // nlines rows of rij energy/force
+
+    vector<double> tmp_rij;
+    vector<double> tmp_val;
+    int ntablines = stoi(get_next_line(tab_files));
+    
+    string line;
+    vector<string> tmp_str_items;
+    int tmp_no_items;
+
+    for (int i=0; i<ntablines; i++)
+    {
+        line         = get_next_line(tab_files);
+        tmp_no_items = split_line(line, tmp_str_items);
+    
+        if (tmp_no_items != 2)
+        {
+            cout << "ERROR: Expected to read two items distance and a force or energy, instead read tmp_no_items " << endl;
+            cout << "       Line: " << line << endl;
+            exit(0);
+        }
+        
+        cout << tmp_str_items[0] << " " << tmp_str_items[1] << endl;
+    
+        tmp_rij.push_back(stod(tmp_str_items[0]));
+        tmp_val.push_back(stod(tmp_str_items[1]));
+    }
+
+    if (energy)
+    {
+        tab_r.push_back(tmp_rij);
+        tab_e.push_back(tmp_val);                        
+    }
+    else
+        tab_f.push_back(tmp_val);   
+    
+    tab_files.close();
+}
+
 void chimesFF::read_parameters(string paramfile)
 {
     // Open the parameter file, run sanity checks
     
     ifstream param_file;
     param_file.open(paramfile.data());
+
+    string param_file_path = get_directory_path(paramfile);
+
     
     if (rank == 0)
         cout << "chimesFF: " << "Reading parameters from file: " << paramfile << endl;
@@ -446,7 +519,7 @@ void chimesFF::read_parameters(string paramfile)
             }
                     
             if (rank == 0)
-                cout << "chimesFF: " << "Will use cutoff style " << tmp_str_items[2] << endl ;
+                cout << "chimesFF: " << "Will use cutoff style " << tmp_str_items[2];
             
             if (fcut_type == fcutType::TERSOFF )
             {
@@ -523,33 +596,58 @@ void chimesFF::read_parameters(string paramfile)
 		line = get_next_line(param_file);
 
 		if(line.find("ENDFILE") != string::npos)
-			break;            
+			break;        
         
         if(line.find("PAIRTYPE PARAMS:") != string::npos)
         {
             tmp_no_items = split_line(line, tmp_str_items);
             
-            tmp_int = stoi(tmp_str_items[2]);
-            
-            if (rank == 0)
-                cout << "chimesFF: " << "Read 2B parameters for pair: " << tmp_int << " " << tmp_str_items[3] << " " << tmp_str_items[4] << endl;
-            
-            line = get_next_line(param_file);
-            
-            split_line(line, tmp_str_items); // Empty line
-            
-            ncoeffs_2b[tmp_int] = poly_orders[0];
-            
-            for(int i=0; i<poly_orders[0]; i++)
+            if (tmp_no_items == 7) // Then these 2B parameters are tabulated
             {
-                line = get_next_line(param_file);
-                split_line(line, tmp_str_items);
-                
-                chimes_2b_pows  [tmp_int].push_back(stoi(tmp_str_items[0]));                
-                chimes_2b_params[tmp_int].push_back(stod(tmp_str_items[1]));
+                tab_param_files.push_back(param_file_path + tmp_str_items[6]);
                 
                 if (rank == 0)
-                    cout << "chimesFF: " << "\t" << chimes_2b_pows[tmp_int][i] << " " << chimes_2b_params[tmp_int][i] << endl;
+                {
+                    cout << "chimesFF: " << "Read 2B parameters for pair: " << tmp_int << " " << tmp_str_items[3] << " " << tmp_str_items[4] << " These are tabulated in " << tab_param_files[tab_param_files.size()-1] << "*" << endl;
+                    cout << "chimesFF: " << "Note: Expects penalty function to be included in tabulation" << endl;
+                }
+                read_2B_tab(tab_param_files[tab_param_files.size()-1]);         // Read tabulated energies
+cout << "HERE" << endl;
+                
+                read_2B_tab(tab_param_files[tab_param_files.size()-1],false);   // Read tabulated forces
+
+                tabulate_2B = true;                
+            }
+            else
+            {
+                if (tabulate_2B)
+                {
+                    cout << "ERROR: All parameters of a given bodiedness must either be tabulated or not tabulated, but not a mixture of each" << endl;
+                    exit(0);
+                }
+                
+                tmp_int = stoi(tmp_str_items[2]);
+            
+                if (rank == 0)
+                    cout << "chimesFF: " << "Read 2B parameters for pair: " << tmp_int << " " << tmp_str_items[3] << " " << tmp_str_items[4] << endl;
+            
+                line = get_next_line(param_file);
+            
+                split_line(line, tmp_str_items); // Empty line
+            
+                ncoeffs_2b[tmp_int] = poly_orders[0];
+            
+                for(int i=0; i<poly_orders[0]; i++)
+                {
+                    line = get_next_line(param_file);
+                    split_line(line, tmp_str_items);
+                
+                    chimes_2b_pows  [tmp_int].push_back(stoi(tmp_str_items[0]));                
+                    chimes_2b_params[tmp_int].push_back(stod(tmp_str_items[1]));
+                
+                    if (rank == 0)
+                        cout << "chimesFF: " << "\t" << chimes_2b_pows[tmp_int][i] << " " << chimes_2b_params[tmp_int][i] << endl;
+                }
             }
         }
         
@@ -1511,6 +1609,153 @@ void chimesFF::compute_2B(const double dx, const vector<double> & dr, const vect
     
     force_scalar_in = force_scalar;
 }
+
+// Tabulated version of compute_2B (no-overloaded)
+void chimesFF::compute_2B_tab(const double dx, const vector<double> & dr, const vector<int> typ_idxs, vector<double> & force, vector<double> & stress, double & energy, chimes2BTmp &tmp, double & force_scalar_in)
+{
+    // Compute 2b (input: 2 atoms or distances, corresponding types... outputs (updates) force, acceleration, energy, stress
+    //
+    // Input parameters:
+    //
+    // dx: Scalar (pair distance)
+    // dr: 1d-Array (pair distance: [x, y, and z-component]) 
+    // Force: [natoms in interaction set][x,y, and z-component] *note
+    // Stress [sxx, sxy, sxz, syy, syz, szz]  *note
+    // Energy: Scalar; energy for interaction set
+    // Tmp: Temporary storage for calculation.
+    
+    // Assumes atom indices start from zero
+    // Assumes distances are atom_2 - atom_1
+    //
+    // *note: force is a packed array of coordinates.
+
+    int     pair_idx;    
+    double  fcut;
+    double  fcutderiv;
+
+
+    pair_idx = atom_int_pair_map[ typ_idxs[0]*natmtyps + typ_idxs[1] ];
+
+    if (dx >= chimes_2b_cutoff[pair_idx][1])
+        return;    
+
+    // Look up/interpolate for energy and force scalar
+
+    energy              += get_tab_2B(pair_idx, dx, true);
+    double force_scalar  = get_tab_2B(pair_idx, dx, false); 
+
+    force[0*CHDIM+0] += force_scalar * dr[0];
+    force[0*CHDIM+1] += force_scalar * dr[1];
+    force[0*CHDIM+2] += force_scalar * dr[2];
+    
+    force[1*CHDIM+0] -= force_scalar * dr[0];
+    force[1*CHDIM+1] -= force_scalar * dr[1];
+    force[1*CHDIM+2] -= force_scalar * dr[2];
+    
+    // xx xy xz yy yz zz
+    // 0  1  2  3  4  5
+    
+    // xx xy xz yx yy yz zx zy zz
+    // 0  1  2  3  4  5  6  7  8
+    // *           *           *
+    
+    stress[0] -= force_scalar * dr[0] * dr[0]; // xx tensor component
+    stress[1] -= force_scalar * dr[0] * dr[1]; // xy tensor component 
+    stress[2] -= force_scalar * dr[0] * dr[2]; // xz tensor component
+    stress[3] -= force_scalar * dr[1] * dr[1]; // yy tensor component
+    stress[4] -= force_scalar * dr[1] * dr[2]; // yz tensor component
+    stress[5] -= force_scalar * dr[2] * dr[2]; // zz tensor component
+
+    double E_penalty = 0.0;
+    get_penalty(dx, pair_idx, E_penalty , force_scalar, true); // true: just check, don't modify energy or force 
+    /*
+    if ( E_penalty > 0.0 ) 
+    {
+        energy += E_penalty;
+
+        force_scalar /= dx ;
+        
+        // Note: force_scalar is negative (LEF) 7/30/21.
+        force[0*CHDIM+0] += force_scalar * dr[0];
+        force[0*CHDIM+1] += force_scalar * dr[1];
+        force[0*CHDIM+2] += force_scalar * dr[2];
+        
+        force[1*CHDIM+0] -= force_scalar * dr[0];
+        force[1*CHDIM+1] -= force_scalar * dr[1];
+        force[1*CHDIM+2] -= force_scalar * dr[2];
+
+        // Update stress according to penalty force. (LEF) 07/30/21
+        stress[0] -= force_scalar  * dr[0] * dr[0]; // xx tensor component
+        stress[1] -= force_scalar  * dr[0] * dr[1]; // xy tensor component 
+        stress[2] -= force_scalar  * dr[0] * dr[2]; // xz tensor component
+        stress[3] -= force_scalar  * dr[1] * dr[1]; // yy tensor component
+        stress[4] -= force_scalar  * dr[1] * dr[2]; // yz tensor component
+        stress[5] -= force_scalar  * dr[2] * dr[2]; // zz tensor component
+
+    }
+    */
+    
+    force_scalar_in = force_scalar;
+}
+
+double chimesFF::get_tab_2B(int pair_idx, double rij, bool for_energy)
+{
+    // Perform binary search to find the appropriate interval
+    
+    auto it = lower_bound(tab_r[pair_idx].begin(), tab_r[pair_idx].end(), rij);
+    int   i = distance(tab_r[pair_idx].begin(), it);
+
+
+    // Ensure rij is in the valid range and handle things if it is not
+
+    if (it == tab_r[pair_idx].end())
+        return 0.0;
+    else if (it == tab_r[pair_idx].begin())
+    {
+        //throw out_of_range("x_point is outside the range of x data.");
+        cout << "Distance is outside the tabulated range" << endl;
+        cout << rij << endl;
+        exit(0);
+    }
+        
+    if (rij == *it && i > 0)  // Adjust index i to point to the beginning of the interval ... If x_point is exactly a value in x, move left to the interval start
+        i--;
+
+    // Compute local spline coefficients a, b, c and d for the interval [x[i], x[i+1]]
+    
+    vector<double>& y = for_energy ? tab_e[pair_idx] : tab_f[pair_idx]; // operate on tab_e or tab_f depending on the value of for_energy
+    
+    // Ensure i is in the valid range and handle things if it is not
+    if (i >= tab_r[pair_idx].size() - 1)
+        return 0.0;
+    else if (i <= 0)
+    {
+        //throw out_of_range("Index i is out of range for computing coefficients.");
+        cout << "Index for energy is outside the tabulated range" << endl;
+        cout << i << endl;
+        exit(0);
+    }
+
+    double h      = tab_r[pair_idx][i + 1] - tab_r[pair_idx][i]; // Step size for the interval
+    double alpha  = (3 * (y[i + 1] - y[i]) / h) - (3 * (y[i] - y[i - 1]) / (tab_r[pair_idx][i] - tab_r[pair_idx][i - 1]));
+    double l      = 2 * (tab_r[pair_idx][i + 1] - tab_r[pair_idx][i - 1]) - h;
+    double mu     = h / l;
+    double z      = alpha / l;
+    double c_prev = 0.0; // Assuming natural spline boundary conditions
+    double c = z - mu * c_prev;
+    double b = (y[i + 1] - y[i]) / h - h * (c + 2 * c_prev) / 3.0;
+    double d = (c - c_prev) / (3.0 * h);
+    double a = y[i];
+
+    // Calculate the difference between the target x and the lower bound of the interval
+    double dx = rij - tab_r[pair_idx][i];
+
+    // Interpolate the target y value using the spline polynomial
+    return a + b * dx + c * dx * dx + d * dx * dx * dx;
+}
+
+
+
 
 // Overload for calls from LAMMPS  
 void chimesFF::compute_3B(const vector<double> & dx, const vector<double> & dr, const vector<int> & typ_idxs, vector<double> & force, vector<double> & stress, double & energy, chimes3BTmp &tmp)
