@@ -194,6 +194,9 @@ string chimesFF::get_next_line(istream& str)
 
 void chimesFF::read_2B_tab(string tab_file, bool energy)
 {
+    // Note: Force and energy tabulation should use the same exact rij values
+    // Note: Those rij values should be listed in ascending order
+    
     ifstream tab_files;
     
     if (energy)
@@ -228,7 +231,7 @@ void chimesFF::read_2B_tab(string tab_file, bool energy)
     
         if (tmp_no_items != 2)
         {
-            cout << "ERROR: Expected to read two items distance and a force or energy, instead read tmp_no_items " << endl;
+            cout << "ERROR: Expected to read two items distance and a force or energy, instead read " << tmp_no_items << " items" << endl;
             cout << "       Line: " << line << endl;
             exit(0);
         }
@@ -247,6 +250,98 @@ void chimesFF::read_2B_tab(string tab_file, bool energy)
     else
         tab_f.push_back(tmp_val);   
     
+    tab_files.close();
+}
+
+void chimesFF::read_3B_tab(string tab_file, bool energy)
+{
+    // Note: Force and energy tabulation should use the same exact rij values
+    // Note: Those rij values should be listed in ascending order
+    // Note: Pairs should be sorted alphabetically, i.e., CC CO CO versus CO CC CO or CO CO CC
+    // Note: For pairs of the same type, the data should be sorted such that the first column alway has the larger number... this symmetry will lead to smaller tabulation file sizes
+    
+    ifstream tab_files;
+    
+    if (energy)
+        tab_file += ".energy";
+    else
+        tab_file += ".force";
+    tab_files.open(tab_file);
+    
+    
+    if (!tab_files.is_open())
+    {
+        cout << "ERROR: Could not open file: " << tab_file << endl;
+        exit(0);
+    }
+
+    // Tabulated file format:
+    // nlines of tabulated data to follow
+    // Energy: nlines rows of rij rik rjk energy
+    // Force:  nlines rows of rij rik rjk fscalar_ij fscalar_ik fscalar_jk
+
+    vector<double> tmp_rij;
+    vector<double> tmp_rik;
+    vector<double> tmp_rjk;
+    
+    vector<double> tmp_val_ij;
+    vector<double> tmp_val_ik;
+    vector<double> tmp_val_jk;
+    
+    
+    int ntablines = stoi(get_next_line(tab_files));
+    
+    string line;
+    vector<string> tmp_str_items;
+    int tmp_no_items;
+
+    for (int i=0; i<ntablines; i++)
+    {
+        line         = get_next_line(tab_files);
+        tmp_no_items = split_line(line, tmp_str_items);
+    
+        if ((tmp_no_items != 4) && (tmp_no_items != 6))
+        {
+            cout << "ERROR: Expected to read either: " << endl;
+            cout << "1. rij rik rjk energy" << endl;
+            cout << "2. rij rik rjk energy fscalar_ij fscalar_ik fscalar_jk" << endl;
+            cout <<"Instead, read " << tmp_no_items << " items" << endl;
+            cout << "       Line: " << line << endl;
+            exit(0);
+        }
+        
+        //cout << tmp_str_items[0] << " " << tmp_str_items[1] << endl;
+    
+        tmp_rij.push_back(stod(tmp_str_items[0]));
+        tmp_rik.push_back(stod(tmp_str_items[1]));
+        tmp_rjk.push_back(stod(tmp_str_items[2]));
+        
+        if (tmp_no_items == 4)
+        {
+            tmp_val_ij.push_back(stod(tmp_str_items[3]));
+        }
+        else
+        {
+            tmp_val_ij.push_back(stod(tmp_str_items[3]));
+            tmp_val_ik.push_back(stod(tmp_str_items[4]));
+            tmp_val_jk.push_back(stod(tmp_str_items[5]));
+        }
+    }
+
+    if (energy)
+    {
+        tab_rij_3B.push_back(tmp_rij);
+        tab_rik_3B.push_back(tmp_rik);
+        tab_rjk_3B.push_back(tmp_rjk);
+        tab_e     .push_back(tmp_val_ij);                        
+    }
+    else
+    {
+        tab_f.push_back(tmp_val_ij); 
+        tab_f.push_back(tmp_val_ik); 
+        tab_f.push_back(tmp_val_jk); 
+    }
+
     tab_files.close();
 }
 
@@ -1728,6 +1823,7 @@ double chimesFF::get_tab_2B(int pair_idx, double rij, bool for_energy)
     // Ensure i is in the valid range and handle things if it is not
     if (i >= tab_r[pair_idx].size() - 1)
         return 0.0;
+    
     else if (i <= 0)
     {
         //throw out_of_range("Index i is out of range for computing coefficients.");
@@ -1963,6 +2059,319 @@ void chimesFF::compute_3B(const vector<double> & dx, const vector<double> & dr, 
 
     return;    
 }
+
+void chimesFF::compute_3B_tab(const vector<double> & dx, const vector<double> & dr, const vector<int> & typ_idxs, vector<double> & force, vector<double> & stress, double & energy, chimes3BTmp &tmp, vector<double> & force_scalar_in)
+{
+    // Compute 3b (input: 3 atoms or distances, corresponding types... outputs (updates) force, acceleration, energy, stress
+    //
+    // Input parameters:
+    //
+    // dx_ij: Scalar (pair distance)
+    // dr_ij: 1d-Array (pair distance: [x, y, and z-component])
+    // Force: [natoms in interaction set][x,y, and z-component] *note
+    // Stress [sxx, sxy, sxz, syy, syz, szz] 
+    // Energy: Scalar; energy for interaction set
+    // Tmp: Temporary storage for 3-body interactions.
+    
+    // Assumes atom indices start from zero
+    // Assumes distances are atom_2 - atom_1
+    //
+    // *note: force and dr are packed vectors of coordinates.
+    
+    const int natoms = 3;                   // Number of atoms in an interaction set
+    const int npairs = natoms*(natoms-1)/2; // Number of pairs in an interaction set
+    
+    // Avoid allocating std::vector quantities.  Heap memory allocation is slow on the GPU.
+    // fixed-length C arrays are allocated on the stack.
+    double fcut[npairs] ;
+    double fcutderiv[npairs] ;
+    double deriv[npairs];
+
+#if DEBUG == 1  
+    if ( dr.size() != 9 )
+    {
+        cout << "Error: dr should have length = 9.  Current length = " << dr.size() << endl ;
+        exit(0) ;
+    }
+#endif
+
+    int type_idx =  typ_idxs[0]*natmtyps*natmtyps + typ_idxs[1]*natmtyps + typ_idxs[2] ;
+    int tripidx  = atom_int_trip_map[type_idx];
+
+    if(tripidx < 0)    // Skipping an excluded interaction
+        return;
+        
+    // Check whether cutoffs are within allowed ranges
+    vector<int> & mapped_pair_idx = pair_int_trip_map[type_idx] ;
+
+    if (dx[0] >= chimes_3b_cutoff[ tripidx ][1][mapped_pair_idx[0]])    // ij
+        return;    
+    if (dx[1] >= chimes_3b_cutoff[ tripidx ][1][mapped_pair_idx[1]])    // ik
+        return;    
+    if (dx[2] >= chimes_3b_cutoff[ tripidx ][1][mapped_pair_idx[2]])    // jk
+        return;    
+     
+    // At this point, all distances are within allowed ranges. We can now proceed to the force/stress/energy calculation
+
+#ifdef USE_DISTANCE_TENSOR  
+    // Tensor product of displacement vectors.
+    double dr2[CHDIM*CHDIM*npairs*npairs] ;
+    init_distance_tensor(dr2, dr, npairs) ;
+#endif
+
+
+    // Look up/interpolate for energy and force scalar .... this can likely be done MUCH more efficiently by integrating force/energy interpolation more completely
+
+    energy += get_tab_3B(tripidx, trip_params_pair_typs[tripidx][mapped_pair_idx[0]], trip_params_pair_typs[tripidx][mapped_pair_idx[1]], trip_params_pair_typs[tripidx][mapped_pair_idx[2]], dx[0], dx[1], dx[2]); // Function is overloaded. No final argument == this is for an energy calculation.
+    double force_scalar[npairs];
+    get_tab_3B(tripidx, trip_params_pair_typs[tripidx][mapped_pair_idx[0]], trip_params_pair_typs[tripidx][mapped_pair_idx[1]], trip_params_pair_typs[tripidx][mapped_pair_idx[2]], dx[0], dx[1], dx[2],  force_scalar);   
+        
+    // Accumulate forces/stresses on/from the ij pair
+    
+    force[0*CHDIM+0] += force_scalar[0] * dr[0*CHDIM+0];
+    force[0*CHDIM+1] += force_scalar[0] * dr[0*CHDIM+1];
+    force[0*CHDIM+2] += force_scalar[0] * dr[0*CHDIM+2];
+    
+    force[1*CHDIM+0] -= force_scalar[0] * dr[0*CHDIM+0];
+    force[1*CHDIM+1] -= force_scalar[0] * dr[0*CHDIM+1];
+    force[1*CHDIM+2] -= force_scalar[0] * dr[0*CHDIM+2];   
+
+        // dr2_3B looks like a function call, but the optimizer should remove it entirely.
+#ifdef USE_DISTANCE_TENSOR
+     // New stress code.
+     stress[0] -= force_scalar[0]  * dr2_3B(dr2,0,0,0,0); // xx tensor component
+     stress[1] -= force_scalar[0]  * dr2_3B(dr2,0,0,0,1); // xy tensor component
+     stress[2] -= force_scalar[0]  * dr2_3B(dr2,0,0,0,2); // xz tensor component
+     stress[3] -= force_scalar[0]  * dr2_3B(dr2,0,1,0,1); // yy tensor component
+     stress[4] -= force_scalar[0]  * dr2_3B(dr2,0,1,0,2); // yz tensor component
+     stress[5] -= force_scalar[0]  * dr2_3B(dr2,0,2,0,2); // zz tensor component
+        
+#else
+    stress[0] -= force_scalar[0]  * dr[0*CHDIM+0] * dr[0*CHDIM+0]; // xx tensor component
+    stress[1] -= force_scalar[0]  * dr[0*CHDIM+0] * dr[0*CHDIM+1]; // xy tensor component
+    stress[2] -= force_scalar[0]  * dr[0*CHDIM+0] * dr[0*CHDIM+2]; // xz tensor component
+    stress[3] -= force_scalar[0]  * dr[0*CHDIM+1] * dr[0*CHDIM+1]; // yy tensor component
+    stress[4] -= force_scalar[0]  * dr[0*CHDIM+1] * dr[0*CHDIM+2]; // yz tensor component
+    stress[5] -= force_scalar[0]  * dr[0*CHDIM+2] * dr[0*CHDIM+2]; // zz tensor component
+#endif        
+    // Accumulate forces/stresses on/from the ik pair
+    
+    force[0*CHDIM+0] += force_scalar[1] * dr[1*CHDIM+0];
+    force[0*CHDIM+1] += force_scalar[1] * dr[1*CHDIM+1];
+    force[0*CHDIM+2] += force_scalar[1] * dr[1*CHDIM+2];
+    
+    force[2*CHDIM+0] -= force_scalar[1] * dr[1*CHDIM+0];
+    force[2*CHDIM+1] -= force_scalar[1] * dr[1*CHDIM+1];
+    force[2*CHDIM+2] -= force_scalar[1] * dr[1*CHDIM+2];   
+
+#ifdef USE_DISTANCE_TENSOR
+    stress[0] -= force_scalar[1]  * dr2_3B(dr2,1,0,1,0); // xx tensor component
+    stress[1] -= force_scalar[1]  * dr2_3B(dr2,1,0,1,1); // xy tensor component
+    stress[2] -= force_scalar[1]  * dr2_3B(dr2,1,0,1,2); // xz tensor component
+    stress[3] -= force_scalar[1]  * dr2_3B(dr2,1,1,1,1); // yy tensor component
+    stress[4] -= force_scalar[1]  * dr2_3B(dr2,1,1,1,2); // yz tensor component
+    stress[5] -= force_scalar[1]  * dr2_3B(dr2,1,2,1,2); // zz tensor component
+#else
+    stress[0] -= force_scalar[1]  * dr[1*CHDIM+0] * dr[1*CHDIM+0]; // xx tensor component
+    stress[1] -= force_scalar[1]  * dr[1*CHDIM+0] * dr[1*CHDIM+1]; // xy tensor component
+    stress[2] -= force_scalar[1]  * dr[1*CHDIM+0] * dr[1*CHDIM+2]; // xz tensor component
+    stress[3] -= force_scalar[1]  * dr[1*CHDIM+1] * dr[1*CHDIM+1]; // yy tensor component
+    stress[4] -= force_scalar[1]  * dr[1*CHDIM+1] * dr[1*CHDIM+2]; // yz tensor component
+    stress[5] -= force_scalar[1]  * dr[1*CHDIM+2] * dr[1*CHDIM+2]; // zz tensor component
+#endif
+        
+    // Accumulate forces/stresses on/from the jk pair
+        
+    force[1*CHDIM+0] += force_scalar[2] * dr[2*CHDIM+0];
+    force[1*CHDIM+1] += force_scalar[2] * dr[2*CHDIM+1];
+    force[1*CHDIM+2] += force_scalar[2] * dr[2*CHDIM+2];
+
+    force[2*CHDIM+0] -= force_scalar[2] * dr[2*CHDIM+0];
+    force[2*CHDIM+1] -= force_scalar[2] * dr[2*CHDIM+1];
+    force[2*CHDIM+2] -= force_scalar[2] * dr[2*CHDIM+2];   
+
+#ifdef USE_DISTANCE_TENSOR
+    stress[0] -= force_scalar[2]  * dr2_3B(dr2,2,0,2,0); // xx tensor component
+    stress[1] -= force_scalar[2]  * dr2_3B(dr2,2,0,2,1); // xy tensor component
+    stress[2] -= force_scalar[2]  * dr2_3B(dr2,2,0,2,2); // xz tensor component
+    stress[3] -= force_scalar[2]  * dr2_3B(dr2,2,1,2,1); // yy tensor component
+    stress[4] -= force_scalar[2]  * dr2_3B(dr2,2,1,2,2); // yz tensor component
+    stress[5] -= force_scalar[2]  * dr2_3B(dr2,2,2,2,2); // zz tensor component
+#else        
+    stress[0] -= force_scalar[2]  * dr[2*CHDIM+0] * dr[2*CHDIM+0]; // xx tensor component
+    stress[1] -= force_scalar[2]  * dr[2*CHDIM+0] * dr[2*CHDIM+1]; // xy tensor component
+    stress[2] -= force_scalar[2]  * dr[2*CHDIM+0] * dr[2*CHDIM+2]; // xz tensor component
+    stress[3] -= force_scalar[2]  * dr[2*CHDIM+1] * dr[2*CHDIM+1]; // yy tensor component
+    stress[4] -= force_scalar[2]  * dr[2*CHDIM+1] * dr[2*CHDIM+2]; // yz tensor component
+    stress[5] -= force_scalar[2]  * dr[2*CHDIM+2] * dr[2*CHDIM+2]; // zz tensor component
+#endif    
+        
+    force_scalar_in[0] = force_scalar[0];
+    force_scalar_in[1] = force_scalar[1];
+    force_scalar_in[2] = force_scalar[2];
+
+    return;    
+}
+
+// Comparator for sorting the vector of pairs
+bool custom_comparator(const pair<string, double>& a, const pair<string, double>& b) 
+{
+    if (a.first == b.first) // If the pair_types are the same, sort by pair_dist in descending order        
+        return a.second > b.second;
+
+    return a.first < b.first; // Otherwise, sort by pair_type in ascending order
+}   
+
+// Linear interpolation function
+double linearInterpolate(double x, double x0, double x1, double f0, double f1) 
+{
+    return f0 * (x1 - x) / (x1 - x0) + f1 * (x - x0) / (x1 - x0);
+}
+
+// Cubic interpolation helper functions using Catmull-Rom splines
+double cubicInterpolate(double p0, double p1, double p2, double p3, double x) 
+{
+    return p1 + 0.5 * x * (p2 - p0 + x * (2 * p0 - 5 * p1 + 4 * p2 - p3 + x * (3 * (p1 - p2) + p3 - p0)));
+}
+
+double bicubicInterpolate(const vector<double>& p, double x, double y) 
+{
+    static vector<double> arr;
+
+    for (size_t i = 0; i < 4; ++i) 
+        arr.push_back(cubicInterpolate(p[i * 4 + 0], p[i * 4 + 1], p[i * 4 + 2], p[i * 4 + 3], x));
+
+    return cubicInterpolate(arr[0], arr[1], arr[2], arr[3], y);
+}
+
+double tricubicInterpolate(const vector<double>& p, double x, double y, double z) 
+{
+    static vector<double> arr;
+    
+    for (size_t i = 0; i < 4; ++i) 
+        arr.push_back(bicubicInterpolate(vector<double>(p.begin() + i * 16, p.begin() + (i + 1) * 16), x, y));
+
+    return cubicInterpolate(arr[0], arr[1], arr[2], arr[3], z);
+}
+
+// Perform the tricubic interpolation
+double chimesFF::interpolateTricubic(int tripidx, double rij, double rik, double rjk, const vector<double>& y)
+{
+    vector<double> * tab_rij_3B_ptr = &tab_rij_3B[tripidx];
+    vector<double> * tab_rik_3B_ptr = &tab_rik_3B[tripidx];
+    vector<double> * tab_rjk_3B_ptr = &tab_rjk_3B[tripidx];
+    
+    // Find the twelve surrounding grid points
+    int i = lower_bound( (*tab_rij_3B_ptr).begin(), (*tab_rij_3B_ptr).end(), rij) - (*tab_rij_3B_ptr).begin() - 1;
+    int j = lower_bound( (*tab_rik_3B_ptr).begin(), (*tab_rik_3B_ptr).end(), rik) - (*tab_rik_3B_ptr).begin() - 1;
+    int k = lower_bound( (*tab_rjk_3B_ptr).begin(), (*tab_rjk_3B_ptr).end(), rjk) - (*tab_rjk_3B_ptr).begin() - 1;
+
+    int size_ij = (*tab_rij_3B_ptr).size();
+    int size_ik = (*tab_rik_3B_ptr).size();
+    int size_jk = (*tab_rjk_3B_ptr).size();
+
+    i = max(1, min(i, (int) size_ij - 3));
+    j = max(1, min(j, (int) size_ik - 3));
+    k = max(1, min(k, (int) size_jk - 3));
+    
+    // Collect the 64 function values to form a 4x4x4 grid cube
+
+    vector<double> values(64);
+    
+    for (int di = -1; di <= 2; ++di) 
+    {
+        for (int dj = -1; dj <= 2; ++dj) 
+        {
+            for (int dk = -1; dk <= 2; ++dk) 
+            {
+                int index = (i + di) * size_ik * size_jk + (j + dj) * size_jk + (k + dk);
+                values[(di + 1) * 16 + (dj + 1) * 4 + (dk + 1)] = y[index];
+            }
+        }
+    }
+
+    double xi = (rij - (*tab_rij_3B_ptr)[i]) / ((*tab_rij_3B_ptr)[i + 1] - (*tab_rij_3B_ptr)[i]);
+    double yi = (rik - (*tab_rik_3B_ptr)[j]) / ((*tab_rik_3B_ptr)[j + 1] - (*tab_rik_3B_ptr)[j]);
+    double zi = (rjk - (*tab_rjk_3B_ptr)[k]) / ((*tab_rjk_3B_ptr)[k + 1] - (*tab_rjk_3B_ptr)[k]);
+
+    // Perform tricubic interpolation
+    return tricubicInterpolate(values, xi, yi, zi);     
+}
+
+// Generic version
+double chimesFF::get_tab_3B_general(int tripidx, string pairtyp_ij, string pairtyp_ik, string pairtyp_jk, double rij, double rik, double rjk, bool for_energy, double (&force_scalar)[3])
+{
+    // Determine the pair types (e.g., CO, CO, CC)
+    
+    static vector<string> pair_types(3);
+    
+    pair_types[0] = pairtyp_ij;
+    pair_types[1] = pairtyp_ik;
+    pair_types[2] = pairtyp_jk;
+    
+    // Store the corresponding distances
+    
+    static vector<double> pair_dists(3);
+        
+    pair_dists[0] = rij;
+    pair_dists[1] = rik;
+    pair_dists[2] = rjk;    
+    
+    // Sort these two items together so they match the ordering of the table:
+    // Pairs are sorted alphabetically, and within a given set of identical pairs, 
+    // distances are sorted in descending order
+    
+    // Create a vector of pairs
+    vector< pair<string, double> > pairs(3);    
+    
+    for (int i = 0; i < 3; ++i) 
+        pairs[i] = make_pair(pair_types[i], pair_dists[i]);
+
+    // Sort the vector of pairs using the custom comparator
+    sort(pairs.begin(), pairs.end(), custom_comparator); 
+
+    // Extract the sorted pair_type and pair_dist vectors
+    for (int i = 0; i < 3; ++i) 
+    {
+        pair_types[i] = pairs[i].first;
+        pair_dists[i] = pairs[i].second;
+    }
+    
+    // Do the interpolation
+    
+    if (for_energy)
+    {
+        return interpolateTricubic(tripidx, pair_dists[0], pair_dists[1], pair_dists[2], tab_e_3B[tripidx]);
+    }
+    else
+    {
+        force_scalar[0] =  interpolateTricubic(tripidx, pair_dists[0], pair_dists[1], pair_dists[2], tab_f_ij_3B[tripidx]);
+        force_scalar[1] =  interpolateTricubic(tripidx, pair_dists[0], pair_dists[1], pair_dists[2], tab_f_ik_3B[tripidx]);
+        force_scalar[2] =  interpolateTricubic(tripidx, pair_dists[0], pair_dists[1], pair_dists[2], tab_f_jk_3B[tripidx]);
+        return 0;
+    }
+}
+// energy version
+double chimesFF::get_tab_3B(int tripidx, string pairtyp_ij, string pairtyp_ik, string pairtyp_jk, double rij, double rik, double rjk)
+{  
+    double dummy[3];
+    return get_tab_3B_general(tripidx, pairtyp_ij, pairtyp_ik, pairtyp_jk, rij, rik, rjk, true, dummy); 
+}
+
+// Force version
+double chimesFF::get_tab_3B(int tripidx, string pairtyp_ij, string pairtyp_ik, string pairtyp_jk, double rij, double rik, double rjk, double (&force_scalar)[3])
+{
+    get_tab_3B_general(tripidx, pairtyp_ij, pairtyp_ik, pairtyp_jk, rij, rik, rjk, false, force_scalar);
+    return 0;
+}
+
+
+
+    
+
+
+
+
 
 void chimesFF::compute_4B(const vector<double> & dx, const vector<double> & dr, const vector<int> & typ_idxs, vector<double> & force, vector<double> & stress, double & energy, chimes4BTmp &tmp)
 {              
