@@ -52,6 +52,7 @@ elif [[ "$hosttype" == "UT-TACC" ]] ; then
     cp etc/Makefile.mpi_chimes.UT-TACC build/lammps_stable_29Oct2020/src/MAKE/Makefile.mpi_chimes
 elif [[ "$hosttype" == "ANL-Polaris" ]] ; then
     source modfiles/ANL-Polaris.mod
+    cp etc/Makefile.mpi_chimes.ANL-Polaris build/lammps_stable_29Oct2020/src/MAKE/Makefile.mpi_chimes
 else
     echo ""
     echo "ERROR: Unknown hosttype ($hosttype) specified"
